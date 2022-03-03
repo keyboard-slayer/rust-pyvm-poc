@@ -11,4 +11,3 @@ crate-type = ["cdylib"]
 
 [dependencies]
 cpython = "*"
-phf = "0.10.1"

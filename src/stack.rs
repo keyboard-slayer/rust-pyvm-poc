@@ -1,36 +1,48 @@
-use cpython::{Python, PyObject};
+use cpython::{PyObject, Python};
 use std::collections::VecDeque;
 use std::process::exit;
 
 pub struct PyStack<'a> {
     stack: VecDeque<PyObject>,
-    py: Python<'a>
+    _py: Python<'a>,
 }
 
 impl PyStack<'_> {
     pub fn new(py: Python) -> PyStack {
         PyStack {
             stack: VecDeque::new(),
-            py: py
+            _py: py,
         }
     }
 
     pub fn object_check(&mut self, _obj: &PyObject) -> bool {
-        true 
+        true
     }
 
-    pub fn unsafe_push(&mut self, obj: PyObject) {
+    pub fn unsafe_push_front(&mut self, obj: PyObject) {
+        self.stack.push_front(obj);
+    }
+
+    pub fn unsafe_push_back(&mut self, obj: PyObject) {
         self.stack.push_back(obj);
     }
 
-    pub fn safe_push(&mut self, obj: PyObject) {
+    pub fn safe_push_back(&mut self, obj: PyObject) {
         if self.object_check(&obj) {
-            self.unsafe_push(obj)
-        }
-        else {
+            self.unsafe_push_back(obj)
+        } else {
             eprintln!("UNSAFE !!!");
             exit(1);
             // TODO RAISE EXCEPTION
+        }
+    }
+
+    pub fn safe_push_front(&mut self, obj: PyObject) {
+        if self.object_check(&obj) {
+            self.unsafe_push_front(obj)
+        } else {
+            eprintln!("UNSAFE !!!");
+            exit(1);
         }
     }
 
@@ -46,8 +58,7 @@ impl PyStack<'_> {
                 eprintln!("UNSAFE !!!");
                 exit(1);
             }
-        }
-        else {
+        } else {
             None
         }
     }
