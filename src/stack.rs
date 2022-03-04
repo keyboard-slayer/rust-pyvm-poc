@@ -2,16 +2,15 @@ use cpython::{PyObject, Python};
 use std::collections::VecDeque;
 use std::process::exit;
 
-pub struct PyStack<'a> {
+#[derive(Debug)]
+pub struct PyStack {
     stack: VecDeque<PyObject>,
-    _py: Python<'a>,
 }
 
-impl PyStack<'_> {
-    pub fn new(py: Python) -> PyStack {
+impl PyStack {
+    pub fn new(_py: Python) -> PyStack {
         PyStack {
             stack: VecDeque::new(),
-            _py: py,
         }
     }
 

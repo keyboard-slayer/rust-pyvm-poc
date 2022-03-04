@@ -5,8 +5,7 @@ extern crate cpython;
 mod opcode;
 mod stack;
 
-use cpython::{exc, PyErr, Python, PyObject, PyDict, PyClone, PyResult, PythonObject, ObjectProtocol, PyTuple, NoArgs};
-use std::process::exit;
+use cpython::{exc, PyErr, Python, PyObject, PyDict, PyClone, PyResult, PythonObject, ObjectProtocol, PyTuple, PyModule, NoArgs};
 use std::u8;
 
 fn to_byte_vec(hex: String) -> Vec<u8> 
@@ -26,6 +25,7 @@ fn reval(py: Python, bytecode: PyObject, globals: Option<PyDict>, locals: Option
     let local_var;
     let global_var;
 
+
     if let None = globals 
     {
         global_var = py.eval("globals()", None, None).unwrap().cast_as::<PyDict>(py).unwrap().copy(py).unwrap();
@@ -44,13 +44,44 @@ fn reval(py: Python, bytecode: PyObject, globals: Option<PyDict>, locals: Option
         local_var = locals.unwrap();
     }
 
+    println!("=== {} === ", bytecode.getattr(py, "co_name").unwrap());
+    let scope = global_var.copy(py).unwrap();
+    println!("Globals: {:?}", global_var.items(py));
+    println!("Locals: {:?}", local_var.items(py));
+    _ = scope.set_item(py, "func", &bytecode);
+    _ = scope.set_item(py, "dis", PyModule::import(py, "dis").unwrap());
+    _ = scope.set_item(py, "sys", PyModule::import(py, "sys").unwrap());
+    _ = py.eval("sys.stdout.write(dis.code_info(func))", Some(&scope), Some(&local_var));
+    println!("\n");
+    _ = py.eval("dis.dis(func)", Some(&scope), Some(&local_var));
+
     let code = bytecode.getattr(py, "co_code").unwrap();
     let names = bytecode.getattr(py, "co_names").unwrap();
     let consts = bytecode.getattr(py, "co_consts").unwrap();
     let varnames = bytecode.getattr(py, "co_varnames").unwrap();
 
-    let builtins_dict_obj = global_var.get_item(py, "__builtins__").unwrap();
-    let builtins_dict = builtins_dict_obj.cast_as::<PyDict>(py).unwrap();
+    let builtins_module = global_var.get_item(py, "__builtins__").unwrap();
+    let builtins_dict;
+
+    if let Ok(builtins_dict_obj) = builtins_module.getattr(py, "__dict__") 
+    {
+        if let Ok(builtins_dict_res) = builtins_dict_obj.cast_as::<PyDict>(py).unwrap().copy(py) 
+        {
+            builtins_dict = builtins_dict_res;
+        }
+        else 
+        {
+            return Err(PyErr::new::<exc::RuntimeError, _>(py, "Couldn't copy globals() values"));
+        }
+    } 
+    else if let Ok(builtins_dict_res) = builtins_module.cast_as::<PyDict>(py) 
+    {
+        builtins_dict = builtins_dict_res.copy(py).unwrap();
+    }
+    else 
+    {
+        return Err(PyErr::new::<exc::SyntaxError, _>(py, "A dictionnary or a module as intended for globals"));
+    }
 
     let hex = code.call_method::<NoArgs>(py, "hex", NoArgs, None);
     let mut opcode = to_byte_vec(hex.unwrap().to_string()).into_iter();
@@ -225,16 +256,32 @@ fn reval(py: Python, bytecode: PyObject, globals: Option<PyDict>, locals: Option
                         }
                     }
 
-                    let args_repr = args.iter().map(|obj| obj.repr(py).unwrap()).collect::<Vec<_>>();
-                    let args_repr_str = args_repr.iter().map(|obj| obj.to_string(py).unwrap()).collect::<Vec<_>>();
+                    args.reverse();
 
                     if let Some(func) = stack.unsafe_pop() 
                     {
-                        if builtins_dict.contains(py, &func).unwrap() 
+                        if let Some(funcobj) = builtins_dict.get_item(py, &func)
                         {
-                            _ = py.eval(format!("{}({})", func, args_repr_str.join(",")).as_str(), None, None);
+                            if argc == 0 
+                            {
+                                match funcobj.call::<NoArgs>(py, NoArgs, None)
+                                {
+                                    Ok(val) => stack.safe_push_back(val),
+                                    Err(e) => return Err(e)
+                                }
+                            }
+                            else 
+                            {
+                                let tuple_arg = PyTuple::new(py, args.as_slice());
+                                match funcobj.call(py, tuple_arg, None) 
+                                {
+                                    Ok(val) => stack.safe_push_back(val),
+                                    Err(e) => return Err(e)
+                                }
+                            }
+                            
                         }
-                        else if global_var.contains(py, &func).unwrap() 
+                        else if global_var.contains(py, &func).unwrap()
                         {
                             let scope = global_var.copy(py).unwrap();
                             let code_obj = global_var.get_item(py, &func).unwrap();
@@ -252,14 +299,48 @@ fn reval(py: Python, bytecode: PyObject, globals: Option<PyDict>, locals: Option
                         } 
                         else if func.is_callable(py) 
                         {
+                            if func.get_type(py).name(py) == "method" 
+                            {
+                                println!("OK");
+                                args.reverse();
+                                args.push(func.getattr(py, "__self__").unwrap());
+                                args.reverse();
+                            }
+
+                            let code = func.getattr(py, "__code__").unwrap();
                             if argc == 0 
                             {
-                                stack.safe_push_back(func.call::<NoArgs>(py, NoArgs, None).unwrap());
+                                match reval(py, code, Some(global_var.copy(py).unwrap()), None)
+                                {
+                                    Ok(ret) => stack.safe_push_back(ret),
+                                    Err(e) => return Err(e)
+                                }
                             } 
                             else 
                             {
-                                let tuple_arg = PyTuple::new(py, args.as_slice());
-                                stack.safe_push_back(func.call::<PyTuple>(py, tuple_arg, None).unwrap());
+                                let argcount = code.getattr(py, "co_argcount").unwrap().extract::<usize>(py).unwrap();
+                                let argnames = &code.getattr(py, "co_varnames").unwrap().extract::<Vec<String>>(py).unwrap();
+
+                                if let Ok(funcscope) = global_var.copy(py)
+                                {
+                                    for i in 0..argcount 
+                                    {
+                                        if let Some(argval) = args.get(i) 
+                                        {
+                                            _ = funcscope.set_item::<&str, PyObject>(py, argnames.get(i).unwrap().as_str(), argval.clone_ref(py));
+                                        }
+                                    }
+
+                                    match reval(py, code, Some(global_var.copy(py).unwrap()), Some(funcscope)) 
+                                    {
+                                        Ok(ret) => stack.safe_push_back(ret),
+                                        Err(e) => return Err(e)
+                                    }
+                                }
+                                else 
+                                {
+                                    return Err(PyErr::new::<exc::RuntimeError, _>(py, "Couldn't create new local scope"));
+                                }
                             }
                         } 
                         else 
@@ -278,8 +359,7 @@ fn reval(py: Python, bytecode: PyObject, globals: Option<PyDict>, locals: Option
                 }
             }
             _ => {
-                eprintln!("Uncoded bytecode {}", byte);
-                exit(1);
+                return Err(PyErr::new::<exc::NotImplementedError, _>(py, format!("bytecode {} not implemented", byte)))
             }
         }
     }
